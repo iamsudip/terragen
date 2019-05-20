@@ -1,0 +1,47 @@
+#!/usr/bin/env python
+
+import os
+import re
+import sys
+
+module_path = sys.argv[1]
+
+regex = r"var.[a-zA-Z_]+"
+
+variables = []
+
+for subdir, dirs, files in os.walk(module_path):
+    for f in files:
+	with open(f, 'r') as fp:
+            content = fp.read()
+            matches = re.finditer(regex, content, re.MULTILINE)
+            for matchNum, match in enumerate(matches, start=1):
+                match = match.group()
+                match = match.replace('var.', '')
+                variables.append(match)
+
+variables = list(set(variables))
+variables.sort()
+
+try:
+    variables.remove("variable")
+except ValueError:
+    pass
+
+with open('variables.tf', 'w') as fp:
+    for variable in variables:
+        template = 'variable "%s" {\n  description = ""\n}\n\n' % variable
+        fp.write(template)
+
+print "=+" * 50
+print "CALLER MODULE main.tf"
+print "=+" * 50
+for variable in variables:
+    print "%s = \"${var.%s}\"" % (variable, variable)
+
+print "=+" * 50
+print "CALLER MODULE variables.tf"
+print "=+" * 50
+for variable in variables:
+    print 'variable "%s" {\n  default = ""\n}\n' % variable
+print "=+" * 50
