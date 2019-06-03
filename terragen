@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 
+import ConfigParser
 import logging
 import os
 import re
 import sys
 
 import click
+import requests
 
 
 class Log(object):
@@ -27,7 +29,7 @@ class Log(object):
         handlers = [stdout_handler]
         logging.basicConfig(
             level=level,
-            format='[%(asctime)s] - %(levelname)s - %(message)s',
+            format='%(levelname)s - %(message)s',
             handlers=handlers
         )
 
@@ -65,10 +67,11 @@ class Log(object):
 
 
 @click.group()
-@click.option('--stdout', is_flag=True, help='Print generated code to stdout')
+@click.option('--stdout', is_flag=True, default=True,
+              show_default=True, help='Print generated code to stdout')
 @click.option('--debug', is_flag=True, help='Enable debugging')
 @click.option('--path', type=click.Path(exists=True), default=os.getcwd(),
-              help='Terraform module path')
+              show_default=True, help='Terraform module path')
 @click.pass_context
 def cli(ctx, stdout, debug, path):
     ctx.ensure_object(dict)
@@ -95,39 +98,128 @@ def cli(ctx, stdout, debug, path):
     Log.debug('Files to be processed: ', files)
 
 
+class DocumentationManager(object):
+    RESOURCES_URLS_MAP = {}
+    PROVIDERS_CACHED = []
+
+    @classmethod
+    def _create_resource_urls_map(cls, provider):
+        BASE_URL = 'https://www.terraform.io/docs/providers/{provider}/index.html'
+        index_url = BASE_URL.format(provider=provider)
+        cls.PROVIDERS_CACHED.append(provider)
+        return index_url
+
+    @staticmethod
+    def _get_resource_url(cls, resource):
+        provider, resource = resource.split('_', 1)
+        if provider not in cls.PROVIDERS_CACHED:
+            cls._create_resource_urls_map(provider)
+        resource_doc_url = cls.RESOURCES_URLS_MAP.get(provider)
+        return resource_doc_url
+
+        resource_urls_map = DocumentationManager._get_resources_urls_map()
+        return resource_urls_map.get(resource)
+
+    def generate_docs(cls, resources):
+        for resource_type in resources:
+            pass
+
+
+class HCLParser(object):
+    def __init__(self, files):
+        self.hcl = ''
+        for f in files:
+            with open(f) as fp:
+                self.hcl = '\n'.join([
+                    self.hcl, fp.read()])
+
+    def get_variables(self):
+        REGEX = r"var\.[a-zA-Z0-9_]+"
+        matches = re.finditer(REGEX, self.hcl, re.MULTILINE)
+        variables = []
+        for match in matches:
+            variable = match.group().replace('var.', '')
+            if variable not in variables:
+                Log.debug(variable)
+                variables.append(variable)
+        return variables
+
+    def get_resources_with_names(self):
+        REGEX = r"^resource \"[a-zA-Z0-9_]+\" \"[a-zA-Z0-9]+\""
+        matches = re.finditer(REGEX, self.hcl, re.MULTILINE)
+        resources = {}
+        for match in matches:
+            resource_type, resource_name = match.group().replace(
+                'resource ','').replace('"', '').split()
+            resources[resource_type] = resource_name
+        return resources
+
+    def get_resources(self):
+        resources = self.get_resources_with_names()
+        return resources.keys()
+
+
+CONFIG_FILE_NAME = 'config.cfg'
+CONFIG_DIRECTORY = os.path.expanduser('~/.terragen')
+CONFIG_FILE = os.path.join(CONFIG_DIRECTORY, CONFIG_FILE_NAME)
+
 @cli.command()
-@click.option('--out-file', type=click.Path(exists=False), default='vars.tf',
-              help='Variables output file path')
 @click.pass_context
-def variables(ctx, out_file):
+def init(ctx):
+    reset = 'Y'
+    if os.path.exists(CONFIG_FILE):
+        reset = click.prompt('Config file exists. Do you want to reset to default settings? Y/n', default='Y')
+    if not os.path.exists(CONFIG_DIRECTORY):
+        os.makedirs(CONFIG_DIRECTORY)
+    if reset == 'Y':
+        config = ConfigParser.RawConfigParser()
+        config.add_section('general')
+        config.set('general', 'providers', ['aws'])
+        with open(CONFIG_FILE, 'wb') as fp:
+            config.write(fp)
+
+
+@cli.command()
+@click.pass_context
+def update(ctx, config):
+    config = ConfigParser.RawConfigParser()
+    config.read(CONFIG_FILE)
+    providers = config.get('general', 'providers')
+    for provider in providers:
+        # scrap providers and store in database
+
+
+@cli.command()
+@click.option('--out-file', type=click.Path(exists=False),
+              help='Variables output file path')
+@click.option('--add-description', is_flag=True, default=False,
+              help='Add description from terraform docs')
+@click.option('--add-default', is_flag=True, default=False,
+              help='Add default values from terraform docs')
+@click.pass_context
+def variables(ctx, out_file, add_description, add_default):
     path = ctx.obj['PATH']
     out_to_stdout = ctx.obj['STDOUT']
-    regex = r"var\.[a-zA-Z0-9_]+"
+
     files = ctx.obj['FILES']
-    consolidated_terraform = ''
-    for f in files:
-        with open(f) as fp:
-            consolidated_terraform = '\n'.join([
-                consolidated_terraform, fp.read()])
+    parser = HCLParser(files)
+    variables = parser.get_variables()
 
-    matches = re.finditer(regex, consolidated_terraform, re.MULTILINE)
+    if add_description:
+        Log.info('Please run `terragen update <provider>` to update terragen document database.')
 
-    variables = []
-    for match in matches:
-        variable = match.group()
-        if variable not in variables:
-            Log.debug(variable)
-            variables.append(variable)
-    variables.sort()
-    VARIABLE_TEMPLATE = 'variable "%s" {\n  description = ""\n}\n\n'
-
+    VARIABLE_TEMPLATE = 'variable "%s" {\n  description = ""\n}'
     code = ''
     for variable in variables:
-        code = ''.join([code, VARIABLE_TEMPLATE % variable])
+        code = '\n\n'.join([code, VARIABLE_TEMPLATE % variable])
+
+    resources = parser.get_resources()
+    Log.debug(resources)
+
     if out_to_stdout:
         sys.stdout.write(code)
         sys.stdout.flush()
-    else:
+    if out_file:
         with open(os.path.join(path, out_file), 'w') as fp:
             fp.write(code)
 
